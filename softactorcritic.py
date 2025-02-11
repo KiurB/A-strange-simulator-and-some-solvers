@@ -59,7 +59,8 @@ class Actor(nn.Module):
         self.linear_sig = nn.Linear(n_hidden, n_act)
         torch.nn.init.orthogonal_(self.linear_sig.weight)
         
-        self.min = -100
+        self.min = -10
+        self.max = +10
 
         self.double()
         
@@ -69,7 +70,7 @@ class Actor(nn.Module):
         x = F.silu(self.linear3(x))
         mu = self.linear_mu(x)
         log_sigma = self.linear_sig(x)
-        log_sigma.clamp_(min = self.min)
+        log_sigma.clamp_(min = self.min, max=self.max)
         
         return mu,log_sigma
 
@@ -77,16 +78,16 @@ class Actor(nn.Module):
 class TrainingSAC():
 
     def __init__(self,
-                 BATCH_SIZE = 256,
-                 GAMMA = 0.99,
-                 TAU = 0.05,
+                 BATCH_SIZE = 1024,
+                 GAMMA = 0.80,
+                 TAU = 0.01,
                  LR = 3e-5,
                  LR_A = 3e-2,
                  n_act = 5,
                  n_obs = 13,
-                 n_hidden = 512,
-                 act_limits = torch.tensor([[-800,-800,-60,-70,-60],
-                                            [800, 800, 0, 0, -30]])
+                 n_hidden = 256,
+                 act_limits = torch.tensor([[-1000,-1000,-60,-70,-60],
+                                            [1000, 1000, 0, 0, -30]])
                  ): 
         
         #key hyper parameters
@@ -132,7 +133,7 @@ class TrainingSAC():
         self.optim_alpha = optim.AdamW([self.log_alpha],
                                        lr=self.LR_A,
                                        amsgrad=True)
-        self.memory = ReplayMemory(4000)
+        self.memory = ReplayMemory(10000)
         
         #keep track
         self.act_limits = act_limits.to(self.device)
@@ -149,12 +150,11 @@ class TrainingSAC():
                                                                     dim1=-2,
                                                                     dim2=-1))
         
-        act = probs.rsample().to(self.device)
-        act_copy = act.clone()
-        act = F.tanh(act)
+        actd = probs.rsample().to(self.device)
+        act = F.tanh(actd)
         
-        log_p = probs.log_prob(act_copy)
-        act_copy = torch.log((1-F.tanh(act_copy)**2)+1e+4).sum(axis=1)
+        log_p = probs.log_prob(actd)
+        act_copy = torch.log((1-F.tanh(actd)**2)).sum(axis=1)
         log_p -= act_copy
         
         return act, log_p
@@ -179,7 +179,6 @@ class TrainingSAC():
         action_batch = torch.cat(batch.action)
         reward_batch = torch.cat(batch.reward)
         state_action_batch = torch.cat((state_batch,action_batch),dim=1)
-        #lp_batch = torch.cat(batch.logprobability).unsqueeze(1)
         
 
         #compute targets
@@ -219,16 +218,14 @@ class TrainingSAC():
         self.optim_Q2.zero_grad()
         loss_critic1.backward()
         loss_critic2.backward()
-        #torch.nn.utils.clip_grad_value_(self.critic_net1.parameters(),100)
-        #torch.nn.utils.clip_grad_value_(self.critic_net2.parameters(),100)
         self.optim_Q1.step()
         self.optim_Q2.step()
         
         #update actor
         repaction, replp = self.select_action(state_batch)
         repstate_action_batch = torch.cat((state_batch,
-                                           repaction),
-                                          dim=1)
+                                              repaction),
+                                              dim=1)
         replp_batch = replp.unsqueeze(1)
         soft_qr_1 = self.critic_net1(repstate_action_batch)
         soft_qr_2 = self.critic_net2(repstate_action_batch)
@@ -240,21 +237,19 @@ class TrainingSAC():
         
         #optimize actor
         self.optim_policy.zero_grad()
-        loss_actor.backward(retain_graph=False)
-        #torch.nn.utils.clip_grad_value_(self.policy_net.parameters(),100)
+        loss_actor.backward()
         self.optim_policy.step()
         
         #loss alpha
-        loss_alpha = -self.log_alpha*(replp_batch-self.n_act).detach()
+        loss_alpha = -self.log_alpha*(replp_batch.detach()-self.n_act)
         loss_alpha = torch.mean(loss_alpha)
         
         #optimize alpha
         self.optim_alpha.zero_grad()
         loss_alpha.backward()
-        #torch.nn.utils.clip_grad_value_(self.log_alpha,100)
         self.optim_alpha.step()
         
-        self.alpha = torch.exp(self.log_alpha)
+        self.alpha = torch.exp(self.log_alpha).detach().clone()
         
         
     def training_loop(self, n_episodes, k):
@@ -263,6 +258,7 @@ class TrainingSAC():
         state_mu = torch.full((1,13),1e-4,device=self.device)
         state_sigma = torch.full((1,13),1e-4,device=self.device)
         c=1
+        lr_forget = 0.005
         
         for i in range(n_episodes):
             
@@ -270,10 +266,11 @@ class TrainingSAC():
             mean_r = 0
             
             #update parameters
+            forget = max(1/c,lr_forget)
             old_mu = state_mu
-            state_mu = state_mu+(simulator.state-state_mu)/c
-            state_sigma = state_sigma+(simulator.state-state_mu)*\
-                (simulator.state-old_mu)/c
+            state_mu = (1-forget)*state_mu+(simulator.state-state_mu)*forget
+            state_sigma = (1-forget)*state_sigma+(simulator.state-state_mu)*\
+                (simulator.state-state_mu)*forget
             state_std = torch.sqrt(state_sigma)
             
             for t in count():
@@ -293,10 +290,11 @@ class TrainingSAC():
                 #update parameters
                 if not torch.isnan(simulator.state).any():
                     c += 1
+                    forget = max(1/c,lr_forget)
                     old_mu = state_mu
-                    state_mu = state_mu+(simulator.state-state_mu)/c
-                    state_sigma = state_sigma+(simulator.state-state_mu)*\
-                                           (simulator.state-old_mu)/c
+                    state_mu = (1-forget)*state_mu+(simulator.state-state_mu)*forget
+                    state_sigma = (1-forget)*state_sigma+(simulator.state-state_mu)*\
+                                           (simulator.state-state_mu)*forget
                     state_std = torch.sqrt(state_sigma)
                 
                 state = norm_state.detach().clone()
@@ -313,22 +311,24 @@ class TrainingSAC():
                                  )
                 
                 #optimize
-                self.optimize_model()
+                skip = 10
+                if t%skip==0:
+                    self.optimize_model()
                 
-                #soft update the weights
+                    #soft update the weights
 
-                target_net_state_dict1 = self.critic_net1.state_dict()
-                target_net_state_dict2 = self.critic_net2.state_dict()
+                    target_net_state_dict1 = self.critic_net1.state_dict()
+                    target_net_state_dict2 = self.critic_net2.state_dict()
                 
-                for key in target_net_state_dict1:
-                    target_net_state_dict1[key] = target_net_state_dict_old1[key].clone()*\
-                        self.TAU+target_net_state_dict_old1[key].clone()*(1-self.TAU)
-                for key in target_net_state_dict2:
-                    target_net_state_dict2[key] = target_net_state_dict_old2[key].clone()*\
-                        self.TAU+target_net_state_dict_old2[key].clone()*(1-self.TAU)
+                    for key in target_net_state_dict1:
+                        target_net_state_dict1[key] = target_net_state_dict_old1[key].clone()*\
+                            self.TAU+target_net_state_dict_old1[key].clone()*(1-self.TAU)
+                    for key in target_net_state_dict2:
+                        target_net_state_dict2[key] = target_net_state_dict_old2[key].clone()*\
+                            self.TAU+target_net_state_dict_old2[key].clone()*(1-self.TAU)
                 
-                self.target_net1.load_state_dict(target_net_state_dict1)
-                self.target_net2.load_state_dict(target_net_state_dict2)
+                    self.target_net1.load_state_dict(target_net_state_dict1)
+                    self.target_net2.load_state_dict(target_net_state_dict2)
                 
                 mean_r += reward[0]
                 gc.collect()
