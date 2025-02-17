@@ -59,7 +59,7 @@ class TrainingDQN():
     
     def __init__(self,BATCH_SIZE=512,GAMMA=0.99,
                      EPS_START=0.80,EPS_END=0.05,EPS_DECAY=1000,
-                     TAU=0.1,LR=1e-4,
+                     TAU=0.05,LR=1e-4,
                      n_actions=243,n_obs=13):
         
         #key hyper parameters
@@ -190,7 +190,7 @@ class TrainingDQN():
                 policy_net_state_dict = self.policy_net.state_dict()
                 for key in policy_net_state_dict:
                     target_net_state_dict[key] = policy_net_state_dict[key]*\
-                        self.TAU+target_net_state_dict[key]*(1-self.TAU)
+                        (1-self.TAU)+target_net_state_dict[key]*self.TAU
                 self.target_net.load_state_dict(target_net_state_dict)
                 
                 c += 1
