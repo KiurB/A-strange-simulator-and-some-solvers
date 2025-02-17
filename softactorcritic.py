@@ -322,10 +322,10 @@ class TrainingSAC():
                 
                     for key in target_net_state_dict1:
                         target_net_state_dict1[key] = target_net_state_dict_old1[key].clone()*\
-                            self.TAU+target_net_state_dict_old1[key].clone()*(1-self.TAU)
+                            (1-self.TAU)+target_net_state_dict_old1[key].clone()*self.TAU
                     for key in target_net_state_dict2:
                         target_net_state_dict2[key] = target_net_state_dict_old2[key].clone()*\
-                            self.TAU+target_net_state_dict_old2[key].clone()*(1-self.TAU)
+                            (1-self.TAU)+target_net_state_dict_old2[key].clone()*self.TAU
                 
                     self.target_net1.load_state_dict(target_net_state_dict1)
                     self.target_net2.load_state_dict(target_net_state_dict2)
